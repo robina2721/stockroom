@@ -531,30 +531,62 @@ document.getElementById('csvClose').addEventListener('click', () => csvBackdrop.
 document.getElementById('csvCancel').addEventListener('click', () => csvBackdrop.style.display = 'none');
 csvBackdrop.addEventListener('click', e => { if (e.target === csvBackdrop) csvBackdrop.style.display = 'none'; });
 
-function parsePastedRows(text) {
+function parseDelimitedText(text) {
+  // Handles quoted fields (which may contain the delimiter itself, or an
+  // embedded line break, like Google Sheets sometimes produces) rather than
+  // naively splitting on newlines/commas first.
   const delim = text.includes('\t') ? '\t' : ',';
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-  if (lines.length === 0) return [];
+  const rows = [];
+  let field = '';
+  let row = [];
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
+
+    if (inQuotes) {
+      if (ch === '"' && next === '"') { field += '"'; i++; }
+      else if (ch === '"') { inQuotes = false; }
+      else { field += ch; }
+      continue;
+    }
+
+    if (ch === '"') { inQuotes = true; }
+    else if (ch === delim) { row.push(field); field = ''; }
+    else if (ch === '\r') { /* ignore */ }
+    else if (ch === '\n') { row.push(field); field = ''; rows.push(row); row = []; }
+    else { field += ch; }
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+
+  return rows
+    .map(r => r.map(c => c.replace(/\s+/g, ' ').trim()))
+    .filter(r => r.some(c => c.length));
+}
+
+function parsePastedRows(text) {
+  const allRows = parseDelimitedText(text);
+  if (allRows.length === 0) return { rows: [], totalLines: 0, skipped: 0 };
 
   let start = 0;
-  const firstCols = lines[0].split(delim).map(c => c.trim().toLowerCase());
-  if (firstCols[0].includes('title')) start = 1; // skip header row
+  if ((allRows[0][0] || '').toLowerCase().includes('title')) start = 1; // skip header row
 
   const rows = [];
-  for (let i = start; i < lines.length; i++) {
-    const cols = lines[i].split(delim);
-    if (cols.length < 3) continue;
-    const title = cols[0].replace(/^"|"$/g, '').trim();
-    const variantId = cols[1].replace(/^"|"$/g, '').trim();
+  let skipped = 0;
+  for (let i = start; i < allRows.length; i++) {
+    const cols = allRows[i];
+    const title = (cols[0] || '').trim();
+    const variantId = (cols[1] || '').trim();
     const qty = parseInt(cols[2], 10);
-    if (!title || !variantId || isNaN(qty)) continue;
+    if (!title || !variantId || isNaN(qty)) { skipped++; continue; }
     rows.push({ title, variantId, qty });
   }
-  return rows;
+  return { rows, totalLines: allRows.length - start, skipped };
 }
 
 document.getElementById('csvSave').addEventListener('click', () => {
-  const rows = parsePastedRows(document.getElementById('csvArea').value);
+  const { rows, totalLines, skipped } = parsePastedRows(document.getElementById('csvArea').value);
   if (rows.length === 0) {
     alert('Could not find any valid rows. Make sure each line has Title, Variant Id and Qty.');
     return;
@@ -591,9 +623,13 @@ document.getElementById('csvSave').addEventListener('click', () => {
   render();
   csvBackdrop.style.display = 'none';
   const catalogNote = state.catalogMeta
-    ? ` (${autoFilled} auto-filled from catalog)`
+    ? ` · ${autoFilled} auto-filled from catalog`
     : ' — load a catalog file first (Fill photos & sizes) so new items get photos automatically';
-  toast(`<span>Synced: <strong>${added}</strong> new, <strong>${updated}</strong> updated${catalogNote}</span>`);
+  const skipNote = skipped ? ` · ${skipped} of ${totalLines} rows couldn't be read (check for missing columns)` : '';
+  toast(`<span>Synced: <strong>${added}</strong> new, <strong>${updated}</strong> updated${catalogNote}${skipNote}</span>`);
+  if (skipped) {
+    console.log(`Sync from Sheet: ${skipped} of ${totalLines} pasted rows were skipped (missing title, variant ID, or a readable quantity). Check your paste for missing columns.`);
+  }
 });
 
 // ---------- boot ----------
