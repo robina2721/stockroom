@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Addis Outfits · Stockroom</title>
+<meta name="description" content="On-hand stock tracker for Addis Outfits — mark items sold, add new arrivals, and see what's in stock at a glance.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2220%22 fill=%22%2316181D%22/><text x=%2250%22 y=%2266%22 font-size=%2255%22 font-family=%22Georgia%22 fill=%22%23E2A63B%22 text-anchor=%22middle%22>A</text></svg>">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="container topbar-row">
+    <div>
+      <div class="wordmark">ADDIS OUTFITS<span class="dot">·</span>STOCKROOM</div>
+      <div class="tagline">on-hand inventory — addisoutfits.com</div>
+    </div>
+    <div class="topbar-actions">
+      <button class="btn btn-ghost" id="btnImportCsv" title="Paste rows copied from your Google Sheet">Sync from Sheet</button>
+      <label class="btn btn-gold" for="fileCatalog" style="cursor:pointer;" title="Load addisoutfits-catalog.json to auto-fill photos and size/color">
+        Fill photos &amp; sizes
+        <input type="file" id="fileCatalog" accept="application/json" style="display:none;">
+      </label>
+      <button class="btn btn-icon btn-ghost" id="btnCatalogHelp" title="How do I get the catalog file?" aria-label="How do I get the catalog file?">?</button>
+      <button class="btn btn-ghost" id="btnExport">Export JSON</button>
+      <label class="btn btn-ghost" for="fileImport" style="cursor:pointer;">
+        Import JSON
+        <input type="file" id="fileImport" accept="application/json" style="display:none;">
+      </label>
+      <button class="btn btn-gold" id="btnAdd">+ Add item</button>
+    </div>
+  </div>
+  <div class="container">
+    <div id="catalogStatus" class="tagline" style="text-align:right;margin-top:2px;"></div>
+  </div>
+</header>
+
+<main class="container">
+
+  <section class="stats" id="stats"></section>
+
+  <section class="toolbar">
+    <div class="search-wrap">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" class="search-input" id="search" placeholder="Search by title, variant ID, size or color…">
+    </div>
+    <div class="chips" id="filterChips">
+      <button class="chip active" data-filter="all">All</button>
+      <button class="chip" data-filter="stock">In stock</button>
+      <button class="chip" data-filter="low">Low stock</button>
+      <button class="chip" data-filter="sold">Sold out</button>
+    </div>
+    <select class="sort-select" id="sortSelect">
+      <option value="newest">Newest first</option>
+      <option value="title">Title A–Z</option>
+      <option value="qtyLow">Qty: low to high</option>
+      <option value="qtyHigh">Qty: high to low</option>
+    </select>
+  </section>
+
+  <section class="grid" id="grid"></section>
+
+</main>
+
+<footer class="footer">
+  ADDIS OUTFITS STOCKROOM &mdash; DATA STORED LOCALLY IN THIS BROWSER &mdash; EXPORT REGULARLY TO BACK UP
+</footer>
+
+<!-- Add / Edit modal -->
+<div class="modal-backdrop" id="modalBackdrop" style="display:none;">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modalTitle">Add item</h2>
+      <button class="btn btn-icon btn-ghost" id="modalClose" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label for="f_title">Product title</label>
+        <input type="text" id="f_title" placeholder="e.g. Samba Vegan OG Unisex Low">
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="f_variant">Variant ID</label>
+          <input type="text" id="f_variant" placeholder="e.g. 51115235443002">
+        </div>
+        <div class="field">
+          <label for="f_qty">Qty on hand</label>
+          <input type="number" id="f_qty" min="0" step="1" value="1">
+        </div>
+      </div>
+      <div class="field">
+        <label for="f_sizecolor">Size / color</label>
+        <input type="text" id="f_sizecolor" placeholder="e.g. EU 40 · Black">
+      </div>
+      <div class="field">
+        <label for="f_image">Image URL</label>
+        <input type="url" id="f_image" placeholder="Paste the image link from your addisoutfits.com product page">
+        <div class="hint">Right-click the product photo on addisoutfits.com and choose “Copy image address”, then paste it here. No link yet? Leave blank — a placeholder tag is used until you add one.</div>
+        <div class="img-preview" id="imgPreview"><span>No image yet</span></div>
+      </div>
+      <div class="field">
+        <label for="f_notes">Notes</label>
+        <textarea id="f_notes" placeholder="optional — supplier, batch, location…"></textarea>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" id="modalCancel">Cancel</button>
+      <button class="btn btn-gold" id="modalSave">Save item</button>
+    </div>
+  </div>
+</div>
+
+<!-- Sync from Sheet modal -->
+<div class="modal-backdrop" id="csvBackdrop" style="display:none;">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Sync from Sheet</h2>
+      <button class="btn btn-icon btn-ghost" id="csvClose" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="hint">In Google Sheets: select your Title / Variant Id / Qty columns (with header row), copy, then paste below. Existing variant IDs get their quantity added; new ones are created.</div>
+      <div class="field">
+        <label for="csvArea">Pasted rows</label>
+        <textarea id="csvArea" style="min-height:180px;" placeholder="Title	Variant Id	Qty
+Samba Vegan OG Unisex Low	51115235443002	2"></textarea>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" id="csvCancel">Cancel</button>
+      <button class="btn btn-gold" id="csvSave">Merge into stockroom</button>
+    </div>
+  </div>
+</div>
+
+<!-- Catalog help modal -->
+<div class="modal-backdrop" id="catalogHelpBackdrop" style="display:none;">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Fill photos &amp; sizes automatically</h2>
+      <button class="btn btn-icon btn-ghost" id="catalogHelpClose" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="hint">
+        Your store already publishes every product photo and variant (size/color) publicly —
+        we just can't read it from this page directly. A short one-time script fixes that:
+      </div>
+      <div class="field">
+        <label>Step 1 — Copy the script</label>
+        <textarea id="catalogScriptArea" readonly style="min-height:90px;"></textarea>
+        <button class="btn btn-sm btn-ghost" id="btnCopyScript" style="margin-top:8px;">Copy script</button>
+      </div>
+      <div class="field">
+        <label>Step 2 — Run it on your store</label>
+        <div class="hint">
+          Open <strong>addisoutfits.com</strong> in Chrome → press <strong>F12</strong> → click the
+          <strong>Console</strong> tab → paste the script → press <strong>Enter</strong>. It downloads
+          a file called <code>addisoutfits-catalog.json</code>.
+        </div>
+      </div>
+      <div class="field">
+        <label>Step 3 — Load it here</label>
+        <div class="hint">
+          Close this box, click <strong>Fill photos &amp; sizes</strong> above, and pick that downloaded
+          file. Every item whose variant ID matches gets its photo and size/color filled in
+          automatically — no per-item copying.
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-gold" id="catalogHelpDone">Got it</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toastWrap"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
