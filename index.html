@@ -29,10 +29,12 @@
         <input type="file" id="fileImport" accept="application/json" style="display:none;">
       </label>
       <button class="btn btn-gold" id="btnAdd">+ Add item</button>
+      <button class="btn btn-icon btn-ghost" id="btnGithubSync" title="Sync across devices via GitHub" aria-label="GitHub sync settings">☁</button>
     </div>
   </div>
   <div class="container">
     <div id="catalogStatus" class="tagline" style="text-align:right;margin-top:2px;"></div>
+    <div id="githubStatus" class="tagline" style="text-align:right;margin-top:2px;"></div>
   </div>
 </header>
 
@@ -169,6 +171,89 @@ Samba Vegan OG Unisex Low	51115235443002	2"></textarea>
     </div>
     <div class="modal-foot">
       <button class="btn btn-gold" id="catalogHelpDone">Got it</button>
+    </div>
+  </div>
+</div>
+
+<!-- Sync results modal (shows skipped rows in plain sight, no DevTools needed) -->
+<div class="modal-backdrop" id="syncResultsBackdrop" style="display:none;">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Sync results</h2>
+      <button class="btn btn-icon btn-ghost" id="syncResultsClose" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="hint" id="syncResultsSummary" style="font-size:14px;color:var(--paper);"></div>
+      <div class="field" id="syncResultsSkippedWrap" style="display:none;">
+        <label>Rows that couldn't be read</label>
+        <textarea id="syncResultsSkipped" readonly style="min-height:160px;"></textarea>
+        <div class="hint">Each line shows what was found, separated by " | ". A row needs all three: title, variant ID, and a plain number for quantity. Common causes: a blank Variant Id or Qty cell, or a Qty cell containing text (like "n/a" or "2 pairs") instead of just a number.</div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-gold" id="syncResultsDone">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- GitHub sync settings modal -->
+<div class="modal-backdrop" id="githubBackdrop" style="display:none;">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Sync across devices via GitHub</h2>
+      <button class="btn btn-icon btn-ghost" id="githubClose" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="hint">
+        This stores your inventory as a file in your GitHub repo, so your phone,
+        laptop, or any device pulls the same data. It needs a personal access
+        token — a password-like key scoped to just this one repo. Keep it
+        private; anyone with it can edit this repo.
+      </div>
+      <div class="hint" style="color:var(--gold);">
+        Once you connect once and save, anyone who simply opens your site link
+        will automatically see this same live data too — read-only, with no
+        token of their own needed. Only you, with the token, can push changes.
+      </div>
+      <div class="field">
+        <label for="gh_owner">GitHub username</label>
+        <input type="text" id="gh_owner" placeholder="e.g. addisoutfits">
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="gh_repo">Repository name</label>
+          <input type="text" id="gh_repo" placeholder="e.g. stockroom">
+        </div>
+        <div class="field">
+          <label for="gh_branch">Branch</label>
+          <input type="text" id="gh_branch" placeholder="main" value="main">
+        </div>
+      </div>
+      <div class="field">
+        <label for="gh_path">Data file path</label>
+        <input type="text" id="gh_path" placeholder="data/inventory-live.json" value="data/inventory-live.json">
+        <div class="hint">This file doesn't need to exist yet — it's created automatically on first sync.</div>
+      </div>
+      <div class="field">
+        <label for="gh_token">Personal access token</label>
+        <input type="text" id="gh_token" placeholder="github_pat_…">
+        <div class="hint" id="ghTokenHint">
+          <strong>How to get one:</strong> on GitHub, go to
+          Settings → Developer settings → Personal access tokens → Fine-grained tokens →
+          "Generate new token". Set <strong>Repository access</strong> to
+          "Only select repositories" and choose this repo. Under
+          <strong>Permissions → Repository permissions</strong>, set
+          <strong>Contents</strong> to <strong>Read and write</strong>. Copy the
+          token (starts with <code>github_pat_</code>) and paste it here — GitHub
+          only shows it once.
+        </div>
+      </div>
+      <div id="githubTestResult" class="hint"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-danger" id="githubDisconnect">Disconnect</button>
+      <button class="btn btn-ghost" id="githubCancel">Cancel</button>
+      <button class="btn btn-gold" id="githubSave">Save &amp; connect</button>
     </div>
   </div>
 </div>
