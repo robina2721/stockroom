@@ -7,6 +7,7 @@
 const STORAGE_KEY = 'addisoutfits_inventory_v1';
 const CATALOG_KEY = 'addisoutfits_catalog_v1';
 const GITHUB_KEY = 'addisoutfits_github_sync_v1';
+const DIRTY_KEY = 'addisoutfits_github_dirty_v1';
 const LOW_STOCK_THRESHOLD = 1; // qty <= this (and > 0) counts as "low stock"
 
 // ------------------------------------------------------------------
@@ -65,6 +66,7 @@ function loadState() {
 
 function saveState() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state.items));
+  if (state.github) localStorage.setItem(DIRTY_KEY, '1'); // mark "not yet pushed" immediately, synchronously
   scheduleGithubPush();
 }function loadCatalog() {
   const raw = localStorage.getItem(CATALOG_KEY);
@@ -194,20 +196,26 @@ async function githubPush(cfg, items) {
 function scheduleGithubPush() {
   if (!state.github) return;
   clearTimeout(githubPushTimer);
-  githubPushTimer = setTimeout(async () => {
-    if (githubBusy) return;
-    githubBusy = true;
-    renderGithubStatus('Syncing to GitHub…');
-    try {
-      await githubPush(state.github, state.items);
-      renderGithubStatus(`Synced to GitHub · ${new Date().toLocaleTimeString()}`);
-    } catch (e) {
-      console.error(e);
-      renderGithubStatus('Sync failed — check your token/repo settings (☁ button)');
-    } finally {
-      githubBusy = false;
-    }
-  }, 1000);
+  githubPushTimer = setTimeout(() => flushGithubPush(), 1000);
+}
+
+async function flushGithubPush() {
+  if (!state.github) return false;
+  if (githubBusy) return false;
+  githubBusy = true;
+  renderGithubStatus('Syncing to GitHub…');
+  try {
+    await githubPush(state.github, state.items);
+    localStorage.setItem(DIRTY_KEY, '0');
+    renderGithubStatus(`Synced to GitHub · ${new Date().toLocaleTimeString()}`);
+    return true;
+  } catch (e) {
+    console.error(e);
+    renderGithubStatus('Sync failed — check your connection or token (☁ button). Your change is saved on this device and will retry.');
+    return false;
+  } finally {
+    githubBusy = false;
+  }
 }
 
 async function githubPullIntoState(cfg, { silent } = {}) {
@@ -316,6 +324,7 @@ document.getElementById('githubSave').addEventListener('click', async () => {
       // nothing on GitHub yet — push what's here now
       await githubPush(cfg, state.items);
     }
+    localStorage.setItem(DIRTY_KEY, '0');
     document.getElementById('githubTestResult').textContent = 'Connected!';
     renderGithubStatus(`Synced to GitHub · ${new Date().toLocaleTimeString()}`);
     setTimeout(() => { githubBackdrop.style.display = 'none'; }, 700);
@@ -917,8 +926,20 @@ renderGithubStatus('');
 
 if (state.github) {
   // this device is the owner's — pull with the token, which also enables editing
-  loadState(); // show cached data immediately while we fetch the latest
-  githubPullIntoState(state.github, { silent: true });
+  loadState(); // show cached data immediately while we sync
+  const wasDirty = localStorage.getItem(DIRTY_KEY) === '1';
+  if (wasDirty) {
+    // an earlier change never made it to GitHub (e.g. the page was closed too soon) —
+    // push it now BEFORE pulling, so we don't overwrite it with stale remote data
+    flushGithubPush().then(ok => {
+      if (ok) {
+        // now safe to pull, in case another device also pushed something newer since
+        githubPullIntoState(state.github, { silent: true });
+      }
+    });
+  } else {
+    githubPullIntoState(state.github, { silent: true });
+  }
 } else if (publicSourceConfigured()) {
   // a regular visitor — show the shared public data automatically, no login needed
   loadState(); // show cached data immediately
