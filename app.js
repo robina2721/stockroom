@@ -9,6 +9,8 @@ const CATALOG_KEY = 'addisoutfits_catalog_v1';
 const GITHUB_KEY = 'addisoutfits_github_sync_v1';
 const DIRTY_KEY = 'addisoutfits_github_dirty_v1';
 const LOW_STOCK_THRESHOLD = 1; // qty <= this (and > 0) counts as "low stock"
+const DISCOUNT_KEY = 'addisoutfits_discount_pct_v1';
+const THEME_KEY = 'addisoutfits_theme_v1';
 
 // ------------------------------------------------------------------
 // PUBLIC DATA SOURCE — fill this in once and every visitor to your
@@ -78,6 +80,130 @@ function saveState() {
   } catch (e) {
     console.error('Could not read saved catalog', e);
   }
+}
+
+function loadDiscountPct() {
+  const raw = localStorage.getItem(DISCOUNT_KEY);
+  if (raw == null) return 30;
+  const n = Number(raw);
+  return isNaN(n) ? 30 : n;
+}
+
+function saveDiscountPct(pct) {
+  localStorage.setItem(DISCOUNT_KEY, String(pct));
+}
+
+function applyDiscountPctToCatalog(pct) {
+  const mult = Math.max(0, Math.min(100, Number(pct || 30))) / 100;
+  Object.keys(state.catalog || {}).forEach(k => {
+    const e = state.catalog[k] || {};
+    if (e.listPrice != null) {
+      e.price = Math.round((Number(e.listPrice) * mult) * 100) / 100;
+    } else if (e.price != null) {
+      e.listPrice = Math.round((Number(e.price) / Math.max(mult, 0.00001)) * 100) / 100;
+    }
+  });
+  // update items too
+  state.items.forEach(item => {
+    if (item.listPrice != null) {
+      item.price = Math.round((Number(item.listPrice) * mult) * 100) / 100;
+    } else {
+      const entry = state.catalog[item.variantId];
+      if (entry && entry.price != null) {
+        item.listPrice = entry.listPrice;
+        item.price = entry.price;
+      }
+    }
+  });
+  saveCatalog();
+  saveState();
+}
+
+function loadTheme() {
+  const t = localStorage.getItem(THEME_KEY);
+  return t === 'dark' ? 'dark' : 'light';
+}
+
+function saveTheme(theme) {
+  localStorage.setItem(THEME_KEY, theme === 'dark' ? 'dark' : 'light');
+}
+
+function applyTheme(theme) {
+  const t = theme === 'dark' ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', t === 'dark' ? 'dark' : '');
+  // update quick toggle button aria/visual state if present
+  const btn = document.getElementById('btnThemeToggle');
+  if (btn) btn.textContent = t === 'dark' ? '🌙' : '🌓';
+}
+
+// Build catalog entries from a Shopify-like products array (products with variants)
+function buildCatalogFromProducts(allProducts) {
+  const catalog = {};
+  const pct = loadDiscountPct();
+  const mult = Math.max(0, Math.min(100, Number(pct || 30))) / 100;
+  allProducts.forEach(p => {
+    const fallbackImage = (p.images && p.images[0] && p.images[0].src) || '';
+    (p.variants || []).forEach(v => {
+      const image = (v.featured_image && v.featured_image.src) || fallbackImage || '';
+      const sizeColor = (v.title && v.title !== 'Default Title') ? v.title : '';
+      const priceRaw = v.price || v.price_amount || v.price_raw || v.compare_at_price || v.presentment_price || null;
+      const priceNum = priceRaw != null ? Number(priceRaw) : null;
+      const discounted = priceNum != null ? Math.round((priceNum * mult) * 100) / 100 : null;
+      catalog[String(v.id)] = {
+        image,
+        sizeColor,
+        product: p.title,
+        handle: p.handle,
+        listPrice: priceNum != null ? priceNum : undefined,
+        price: discounted != null ? discounted : undefined,
+      };
+    });
+  });
+  return catalog;
+}
+
+// Try to auto-fetch the product catalog from the current origin using paged products.json (Shopify-style)
+async function tryAutoFetchCatalogFromOrigin(maxPages = 50) {
+  try {
+    const BASE = location.origin;
+    let page = 1;
+    let allProducts = [];
+    while (page <= maxPages) {
+      const res = await fetch(`${BASE}/products.json?limit=250&page=${page}`);
+      if (!res.ok) break;
+      const data = await res.json();
+      const products = data.products || [];
+      if (!products.length) break;
+      allProducts = allProducts.concat(products);
+      if (products.length < 250) break;
+      page++;
+    }
+    if (allProducts.length) {
+      const catalog = buildCatalogFromProducts(allProducts);
+      state.catalog = catalog;
+      state.catalogMeta = { count: Object.keys(catalog).length, updatedAt: new Date().toISOString().slice(0,10), source: location.origin };
+      saveCatalog();
+      renderCatalogStatus();
+      // backfill items with price/image/sizeColor when matches found
+      let matched = 0;
+      state.items.forEach(item => {
+        const entry = catalog[item.variantId];
+        if (entry) {
+          if (entry.image) item.imageUrl = entry.image;
+          if (entry.sizeColor) item.sizeColor = entry.sizeColor;
+          if (entry.price) { item.listPrice = entry.listPrice; item.price = entry.price; }
+          matched++;
+        }
+      });
+      saveState();
+      render();
+      toast(`<span>Auto-loaded catalog (${state.catalogMeta.count} variants) from this site — filled ${matched} items.</span>`);
+      return true;
+    }
+  } catch (e) {
+    console.debug('Auto-fetch catalog failed:', e);
+  }
+  return false;
 }
 
 function saveCatalog() {
@@ -421,6 +547,41 @@ function getVisibleItems() {
   return items;
 }
 
+// Find related items for queries that return no exact matches.
+function findRelated(query, maxResults = 12) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return [];
+  const terms = q.split(/\s+/).filter(Boolean);
+
+  const scored = state.items.map(item => {
+    let score = 0;
+    const title = (item.title || '').toLowerCase();
+    const vid = (item.variantId || '').toLowerCase();
+    const sc = (item.sizeColor || '').toLowerCase();
+
+    if (title === q) score += 80;
+    if (title.includes(q)) score += 50;
+    if (title.startsWith(q)) score += 30;
+    if (vid.includes(q)) score += 40;
+
+    terms.forEach(t => {
+      if (!t) return;
+      if (title.includes(t)) score += 12;
+      if (title.split(/\s+/).some(w => w.startsWith(t))) score += 8;
+      if (vid.includes(t)) score += 8;
+      if (sc.includes(t)) score += 6;
+    });
+
+    return { item, score };
+  });
+
+  return scored
+    .filter(s => s.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, maxResults)
+    .map(s => s.item);
+}
+
 function cardTemplate(item) {
   const status = statusOf(item);
   const stampText = status === 'stock' ? 'In stock' : status === 'low' ? 'Low stock' : 'Sold out';
@@ -441,6 +602,7 @@ function cardTemplate(item) {
       <div class="card-meta">
         <span class="vid" data-copy="${escapeHtml(item.variantId)}" title="Click to copy variant ID">#${escapeHtml(item.variantId)}</span>
       </div>
+      ${typeof item.price !== 'undefined' ? `<div class="card-price">${item.listPrice ? `<span class="orig">$${Number(item.listPrice).toFixed(2)}</span>` : ''}<span class="now">$${Number(item.price).toFixed(2)}</span></div>` : ''}
       ${item.sizeColor ? `<div class="card-tags"><span>${escapeHtml(item.sizeColor)}</span></div>` : ''}
       <div class="qty-row">
         <span class="qty-label">On hand</span>
@@ -466,6 +628,17 @@ function render() {
   const items = getVisibleItems();
 
   if (items.length === 0) {
+    if (state.search && state.search.trim()) {
+      const related = findRelated(state.search);
+      if (related.length) {
+        grid.innerHTML = `<div class="empty" style="grid-column:1/-1;">
+          <h3>No exact matches</h3>
+          <p>Showing related products instead.</p>
+        </div>` + related.map(cardTemplate).join('');
+        return;
+      }
+    }
+
     grid.innerHTML = `<div class="empty" style="grid-column:1/-1;">
       <h3>Nothing here</h3>
       <p>Try a different search or filter, or add a new item to the stockroom.</p>
@@ -745,6 +918,20 @@ document.getElementById('fileCatalog').addEventListener('change', e => {
     }
 
     // save the catalog itself so future "Sync from Sheet" merges auto-fill too
+    // If uploaded file is a plain products array, convert it
+    if (Array.isArray(catalog)) {
+      catalog = buildCatalogFromProducts(catalog);
+    }
+
+    // Ensure prices are present and compute discounted price when possible
+    const pct = loadDiscountPct();
+    const mult = Math.max(0, Math.min(100, Number(pct || 30))) / 100;
+    Object.keys(catalog).forEach(k => {
+      const entry = catalog[k] || {};
+      if (entry.listPrice == null && entry.price != null) entry.listPrice = Math.round((Number(entry.price) / Math.max(mult, 0.00001)) * 100) / 100;
+      if (entry.price == null && entry.listPrice != null) entry.price = Math.round((Number(entry.listPrice) * mult) * 100) / 100;
+    });
+
     state.catalog = catalog;
     state.catalogMeta = { count: Object.keys(catalog).length, updatedAt: new Date().toISOString().slice(0, 10) };
     saveCatalog();
@@ -757,6 +944,7 @@ document.getElementById('fileCatalog').addEventListener('change', e => {
       if (entry) {
         if (entry.image) item.imageUrl = entry.image;
         if (entry.sizeColor) item.sizeColor = entry.sizeColor;
+        if (entry.price) { item.listPrice = entry.listPrice; item.price = entry.price; }
         matched++;
       } else {
         unmatched++;
@@ -859,16 +1047,24 @@ document.getElementById('csvSave').addEventListener('click', () => {
     alert('Nothing was pasted, or no rows could be found at all.');
     return;
   }
-  let added = 0, updated = 0, autoFilled = 0;
+  // Deduplicate rows by variantId so duplicates within the pasted content are ignored
+  const unique = new Map();
+  let duplicateLines = 0;
   rows.forEach(row => {
+    if (!unique.has(row.variantId)) unique.set(row.variantId, row);
+    else duplicateLines++;
+  });
+
+  let added = 0, updated = 0, autoFilled = 0;
+  Array.from(unique.values()).forEach(row => {
     const catalogEntry = state.catalog[row.variantId];
     const existing = state.items.find(i => i.variantId === row.variantId);
     if (existing) {
       existing.qty += row.qty;
-      // backfill photo/size on existing items too, if they don't have one yet
       if (catalogEntry) {
         if (!existing.imageUrl && catalogEntry.image) { existing.imageUrl = catalogEntry.image; autoFilled++; }
         if (!existing.sizeColor && catalogEntry.sizeColor) existing.sizeColor = catalogEntry.sizeColor;
+        if (catalogEntry.price && !existing.price) { existing.listPrice = catalogEntry.listPrice; existing.price = catalogEntry.price; }
       }
       updated++;
     } else {
@@ -880,6 +1076,8 @@ document.getElementById('csvSave').addEventListener('click', () => {
         sold: 0,
         imageUrl: catalogEntry?.image || '',
         sizeColor: catalogEntry?.sizeColor || '',
+        listPrice: catalogEntry?.listPrice,
+        price: catalogEntry?.price,
         notes: '',
         dateAdded: new Date().toISOString().slice(0, 10),
       });
@@ -897,6 +1095,7 @@ document.getElementById('csvSave').addEventListener('click', () => {
     `<strong>${added}</strong> new items added`,
     `<strong>${updated}</strong> existing items updated`,
   ];
+  if (duplicateLines) summaryParts.push(`<strong>${duplicateLines}</strong> duplicate rows ignored`);
   if (state.catalogMeta) summaryParts.push(`<strong>${autoFilled}</strong> auto-filled with a photo from your catalog`);
   if (skippedRows.length) summaryParts.push(`<strong>${skippedRows.length}</strong> rows could not be read`);
 
@@ -944,7 +1143,86 @@ if (state.github) {
   // a regular visitor — show the shared public data automatically, no login needed
   loadState(); // show cached data immediately
   loadPublicData();
+  // try to auto-load a catalog from this origin (best-effort; may be blocked by CORS)
+  tryAutoFetchCatalogFromOrigin().catch(() => {});
 } else {
   // no GitHub source configured at all yet — just use local/seed data
   loadState();
 }
+
+// Discount input wiring: set initial value and listen for changes
+(function () {
+  const el = document.getElementById('discountPct');
+  if (!el) return;
+  const pct = loadDiscountPct();
+  el.value = pct;
+  el.addEventListener('input', () => {
+    let v = Number(el.value);
+    if (isNaN(v) || v < 0) v = 0;
+    if (v > 99) v = 99;
+    el.value = v;
+    saveDiscountPct(v);
+    applyDiscountPctToCatalog(v);
+    toast(`<span>Discount set to <strong>${v}%</strong> — prices updated</span>`);
+  });
+})();
+
+// Theme and settings wiring
+(function () {
+  // Apply initial theme
+  const current = loadTheme();
+  applyTheme(current);
+
+  // Quick theme toggle
+  const themeBtn = document.getElementById('btnThemeToggle');
+  if (themeBtn) {
+    themeBtn.addEventListener('click', () => {
+      const t = loadTheme() === 'dark' ? 'light' : 'dark';
+      saveTheme(t);
+      applyTheme(t);
+      toast(`<span>Theme: <strong>${t}</strong></span>`);
+    });
+  }
+
+  // Settings modal
+  const settingsBackdrop = document.getElementById('settingsBackdrop');
+  const btnSettings = document.getElementById('btnSettings');
+  const settingsClose = document.getElementById('settingsClose');
+  const settingsCancel = document.getElementById('settingsCancel');
+  const settingsSave = document.getElementById('settingsSave');
+  const discountModal = document.getElementById('discountPctModal');
+  const themeSelect = document.getElementById('themeSelect');
+
+  function openSettings() {
+    if (!settingsBackdrop) return;
+    // sync current values
+    const pct = loadDiscountPct();
+    if (discountModal) discountModal.value = pct;
+    const th = loadTheme();
+    if (themeSelect) themeSelect.value = th;
+    settingsBackdrop.style.display = 'flex';
+  }
+
+  function closeSettings() { if (settingsBackdrop) settingsBackdrop.style.display = 'none'; }
+
+  if (btnSettings) btnSettings.addEventListener('click', openSettings);
+  if (settingsClose) settingsClose.addEventListener('click', closeSettings);
+  if (settingsCancel) settingsCancel.addEventListener('click', closeSettings);
+  if (settingsBackdrop) settingsBackdrop.addEventListener('click', e => { if (e.target === settingsBackdrop) closeSettings(); });
+
+  if (settingsSave) settingsSave.addEventListener('click', () => {
+    const v = Number(discountModal?.value || loadDiscountPct());
+    const bounded = isNaN(v) ? 30 : Math.max(0, Math.min(99, v));
+    saveDiscountPct(bounded);
+    // update topbar input if present
+    const top = document.getElementById('discountPct'); if (top) top.value = bounded;
+    applyDiscountPctToCatalog(bounded);
+
+    const sel = themeSelect?.value || loadTheme();
+    saveTheme(sel);
+    applyTheme(sel);
+
+    toast(`<span>Settings saved</span>`);
+    closeSettings();
+  });
+})();
