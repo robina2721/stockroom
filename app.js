@@ -11,6 +11,7 @@ const DIRTY_KEY = 'addisoutfits_github_dirty_v1';
 const LOW_STOCK_THRESHOLD = 1; // qty <= this (and > 0) counts as "low stock"
 const DISCOUNT_KEY = 'addisoutfits_discount_pct_v1';
 const THEME_KEY = 'addisoutfits_theme_v1';
+const PROXY_KEY = 'addisoutfits_proxy_url_v1';
 
 // ------------------------------------------------------------------
 // PUBLIC DATA SOURCE — fill this in once and every visitor to your
@@ -50,6 +51,8 @@ function loadState() {
     try {
       state.items = JSON.parse(raw);
       render();
+      // ensure any loaded catalog can backfill missing price/image data
+      if (state.catalog && Object.keys(state.catalog).length) backfillItemsFromCatalog();
       return;
     } catch (e) {
       console.error('Could not read saved stockroom data', e);
@@ -77,9 +80,34 @@ function saveState() {
     const saved = JSON.parse(raw);
     state.catalog = saved.catalog || {};
     state.catalogMeta = saved.meta || null;
+    // recompute prices using current discount and backfill items
+    applyDiscountPctToCatalog(loadDiscountPct());
+    backfillItemsFromCatalog();
   } catch (e) {
     console.error('Could not read saved catalog', e);
   }
+}
+
+function backfillItemsFromCatalog() {
+  let changed = false;
+  const pct = loadDiscountPct();
+  const mult = Math.max(0, Math.min(100, Number(pct || 30))) / 100;
+  state.items.forEach(item => {
+    const entry = state.catalog[item.variantId];
+    if (!entry) return;
+    if (entry.image && !item.imageUrl) { item.imageUrl = entry.image; changed = true; }
+    if (entry.sizeColor && !item.sizeColor) { item.sizeColor = entry.sizeColor; changed = true; }
+    if (entry.listPrice != null && item.listPrice == null) {
+      item.listPrice = entry.listPrice;
+      item.price = Math.round((Number(entry.listPrice) * mult) * 100) / 100;
+      changed = true;
+    } else if (entry.price != null && item.price == null) {
+      item.price = entry.price;
+      if (item.listPrice == null) item.listPrice = Math.round((Number(entry.price) / Math.max(mult, 0.00001)) * 100) / 100;
+      changed = true;
+    }
+  });
+  if (changed) saveState();
 }
 
 function loadDiscountPct() {
@@ -136,6 +164,51 @@ function applyTheme(theme) {
   if (btn) btn.textContent = t === 'dark' ? '🌙' : '🌓';
 }
 
+function loadProxyUrl() {
+  return localStorage.getItem(PROXY_KEY) || '';
+}
+
+function saveProxyUrl(url) {
+  if (!url) localStorage.removeItem(PROXY_KEY);
+  else localStorage.setItem(PROXY_KEY, url);
+}
+
+async function fetchCatalogViaCustomProxy(proxyBase) {
+  const statusEl = document.getElementById('catalogStatus');
+  if (!proxyBase) return false;
+  const base = proxyBase.replace(/\/+$/, '');
+  try {
+    if (statusEl) statusEl.textContent = `Fetching catalog via proxy…`;
+    const start = Date.now();
+    const url = `${base}/catalog?base=${encodeURIComponent(location.origin)}`;
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) throw new Error(`Proxy returned ${r.status}`);
+    const data = await r.json();
+    const products = data.products || [];
+    if (!products.length) {
+      if (statusEl) statusEl.textContent = `Proxy returned no products.`;
+      return false;
+    }
+    const catalog = buildCatalogFromProducts(products);
+    state.catalog = catalog;
+    state.catalogMeta = { count: Object.keys(catalog).length, updatedAt: new Date().toISOString().slice(0,10), source: base };
+    saveCatalog();
+    applyDiscountPctToCatalog(loadDiscountPct());
+    backfillItemsFromCatalog();
+    renderCatalogStatus();
+    render();
+    const took = ((Date.now() - start)/1000).toFixed(1);
+    if (statusEl) statusEl.textContent = `Loaded ${state.catalogMeta.count} variants via proxy in ${took}s`;
+    toast(`<span>Catalog loaded via proxy — ${state.catalogMeta.count} variants</span>`);
+    return true;
+  } catch (err) {
+    console.error('Proxy fetch error', err);
+    if (statusEl) statusEl.textContent = `Proxy fetch failed: ${err.message}`;
+    toast(`<span>Proxy fetch failed: ${escapeHtml(err.message || String(err))}</span>`);
+    return false;
+  }
+}
+
 // Build catalog entries from a Shopify-like products array (products with variants)
 function buildCatalogFromProducts(allProducts) {
   const catalog = {};
@@ -178,6 +251,17 @@ async function tryAutoFetchCatalogFromOrigin(maxPages = 50) {
       if (products.length < 250) break;
       page++;
     }
+    // If the bulk products.json endpoint returned nothing (CORS or store doesn't expose it),
+    // try parsing the sitemap and fetching individual product JSON endpoints as a fallback.
+    if (!allProducts.length) {
+      try {
+        const sitemapProducts = await tryFetchSitemapAndProducts(BASE, 400);
+        if (sitemapProducts && sitemapProducts.length) allProducts = sitemapProducts;
+      } catch (e) {
+        console.debug('Sitemap/product fetch fallback failed', e);
+      }
+    }
+
     if (allProducts.length) {
       const catalog = buildCatalogFromProducts(allProducts);
       state.catalog = catalog;
@@ -203,7 +287,73 @@ async function tryAutoFetchCatalogFromOrigin(maxPages = 50) {
   } catch (e) {
     console.debug('Auto-fetch catalog failed:', e);
   }
+  // last resort: try a local proxy (useful during development). Run the provided proxy at http://localhost:3000
+  try {
+    const proxyUrl = `http://localhost:3000/catalog?base=${encodeURIComponent(location.origin)}`;
+    const r = await fetch(proxyUrl);
+    if (r.ok) {
+      const data = await r.json();
+      const products = data.products || [];
+      if (products.length) {
+        const catalog = buildCatalogFromProducts(products);
+        state.catalog = catalog;
+        state.catalogMeta = { count: Object.keys(catalog).length, updatedAt: new Date().toISOString().slice(0,10), source: proxyUrl };
+        saveCatalog();
+        renderCatalogStatus();
+        backfillItemsFromCatalog();
+        render();
+        toast(`<span>Loaded catalog via local proxy (${state.catalogMeta.count} variants)</span>`);
+        return true;
+      }
+    }
+  } catch (err) {
+    console.debug('Proxy fetch failed', err);
+  }
+
   return false;
+}
+
+// Fallback: fetch the store's sitemap_products_1.xml (if present), extract product URLs,
+// then attempt to fetch per-product JSON endpoints. This is best-effort and may be CORS-blocked.
+async function tryFetchSitemapAndProducts(BASE, maxProducts = 400) {
+  const sitemapUrl = `${BASE}/sitemap_products_1.xml`;
+  const res = await fetch(sitemapUrl);
+  if (!res.ok) throw new Error(`Sitemap fetch failed: ${res.status}`);
+  const xml = await res.text();
+  const locs = Array.from(xml.matchAll(/<loc>([^<]+)<\/loc>/gi)).map(m => m[1]).filter(Boolean);
+  if (!locs.length) return [];
+
+  const products = [];
+  for (let i = 0; i < locs.length && products.length < maxProducts; i++) {
+    const url = locs[i];
+    // try common JSON endpoints for Shopify stores
+    const candidates = [
+      `${url}.json`,
+      url.replace(/\.html$/, '') + '.json',
+      `${BASE}/products/${url.split('/').filter(Boolean).pop()}.json`,
+    ];
+    let ok = false;
+    for (const c of candidates) {
+      try {
+        const r = await fetch(c);
+        if (!r.ok) continue;
+        const data = await r.json();
+        // product JSON may be wrapped (e.g. { product: {...} }) or be the product directly
+        const p = data.product || data.products || data;
+        // normalize: if it's an object with product, take it; if an array, concat
+        if (Array.isArray(p)) p.forEach(x => products.push(x));
+        else if (p && p.id) products.push(p);
+        ok = true;
+        break;
+      } catch (err) {
+        // network/CORS error - try next candidate
+        continue;
+      }
+    }
+    // small delay to avoid spamming the origin (keeps UI responsive)
+    if (i % 20 === 0) await new Promise(r => setTimeout(r, 60));
+  }
+  return products;
 }
 
 function saveCatalog() {
@@ -706,6 +856,7 @@ const f_variant = document.getElementById('f_variant');
 const f_qty = document.getElementById('f_qty');
 const f_sizecolor = document.getElementById('f_sizecolor');
 const f_image = document.getElementById('f_image');
+const f_price = document.getElementById('f_price');
 const f_notes = document.getElementById('f_notes');
 const imgPreview = document.getElementById('imgPreview');
 
@@ -717,6 +868,7 @@ function openModal(item) {
   f_qty.value = item ? item.qty : 1;
   f_sizecolor.value = item?.sizeColor || '';
   f_image.value = item?.imageUrl || '';
+  f_price.value = item?.listPrice != null ? item.listPrice : '';
   f_notes.value = item?.notes || '';
   updateImgPreview();
   modalBackdrop.style.display = 'flex';
@@ -745,6 +897,7 @@ document.getElementById('modalSave').addEventListener('click', () => {
   const title = f_title.value.trim();
   const variantId = f_variant.value.trim();
   const qty = Math.max(0, parseInt(f_qty.value, 10) || 0);
+  const listPriceVal = f_price ? (f_price.value ? Number(f_price.value) : null) : null;
 
   if (!title) { f_title.focus(); return; }
   if (!variantId) { f_variant.focus(); return; }
@@ -757,6 +910,12 @@ document.getElementById('modalSave').addEventListener('click', () => {
       imageUrl: f_image.value.trim(),
       notes: f_notes.value.trim(),
     });
+    // apply manual price if provided
+    if (listPriceVal != null && !isNaN(listPriceVal)) {
+      item.listPrice = listPriceVal;
+      const mult = Math.max(0, Math.min(100, Number(loadDiscountPct() || 30))) / 100;
+      item.price = Math.round((Number(listPriceVal) * mult) * 100) / 100;
+    }
     toast(`<span>Saved changes to <strong>${escapeHtml(title)}</strong></span>`);
   } else {
     state.items.unshift({
@@ -765,6 +924,8 @@ document.getElementById('modalSave').addEventListener('click', () => {
       sold: 0,
       imageUrl: f_image.value.trim(),
       sizeColor: f_sizecolor.value.trim(),
+      listPrice: listPriceVal != null && !isNaN(listPriceVal) ? listPriceVal : undefined,
+      price: listPriceVal != null && !isNaN(listPriceVal) ? Math.round((Number(listPriceVal) * (Math.max(0, Math.min(100, Number(loadDiscountPct() || 30))) / 100)) * 100) / 100 : undefined,
       notes: f_notes.value.trim(),
       dateAdded: new Date().toISOString().slice(0, 10),
     });
@@ -1021,24 +1182,60 @@ function parseDelimitedText(text) {
 function parsePastedRows(text) {
   const allRows = parseDelimitedText(text);
   if (allRows.length === 0) return { rows: [], totalLines: 0, skippedRows: [] };
-
+  // detect header row (if present) and column indexes for title, variant, qty, price
   let start = 0;
-  if ((allRows[0][0] || '').toLowerCase().includes('title')) start = 1; // skip header row
+  const headerRow = allRows[0].map(c => (c || '').toString().toLowerCase());
+  const looksLikeHeader = headerRow.some(h => /title|variant|qty|quantity|price|id/.test(h));
+  let titleIdx = 0, variantIdx = 1, qtyIdx = 2, priceIdx = -1;
+  if (looksLikeHeader) {
+    start = 1;
+    titleIdx = headerRow.findIndex(h => /title/.test(h)); if (titleIdx === -1) titleIdx = 0;
+    variantIdx = headerRow.findIndex(h => /variant|id/.test(h)); if (variantIdx === -1) variantIdx = 1;
+    qtyIdx = headerRow.findIndex(h => /qty|quantity|count|stock/.test(h)); if (qtyIdx === -1) qtyIdx = 2;
+    priceIdx = headerRow.findIndex(h => /price|list price|unit price|cost/.test(h)); // may be -1
+  } else {
+    // no header — guess price is column 3 if many rows have numeric values there
+    const col3Numeric = allRows.slice(0, 10).reduce((c, r) => c + (isNumeric(r[3]) ? 1 : 0), 0);
+    if (col3Numeric >= Math.min(3, allRows.length)) priceIdx = 3;
+  }
 
   const rows = [];
   const skippedRows = [];
   for (let i = start; i < allRows.length; i++) {
     const cols = allRows[i];
-    const title = (cols[0] || '').trim();
-    const variantId = (cols[1] || '').trim();
-    const qty = parseInt(cols[2], 10);
+    const title = (cols[titleIdx] || '').trim();
+    const variantId = (cols[variantIdx] || '').trim();
+    const qty = parseInt(cols[qtyIdx], 10);
+    let price = null;
+    if (priceIdx >= 0) price = parsePrice(cols[priceIdx]);
+    // if price wasn't recognized but there is an extra column at end that looks like a price, try that
+    if (price == null && cols.length > Math.max(titleIdx, variantIdx, qtyIdx) + 1) {
+      for (let j = Math.max(titleIdx, variantIdx, qtyIdx) + 1; j < cols.length; j++) {
+        const p = parsePrice(cols[j]); if (p != null) { price = p; break; }
+      }
+    }
     if (!title || !variantId || isNaN(qty)) {
       skippedRows.push(cols.join(' | ') || '(blank row)');
       continue;
     }
-    rows.push({ title, variantId, qty });
+    rows.push({ title, variantId, qty, price });
   }
   return { rows, totalLines: allRows.length - start, skippedRows };
+}
+
+function isNumeric(v) {
+  if (v == null) return false;
+  return !isNaN(Number(String(v).replace(/[^0-9.-]+/g, '').replace(/,/g, '.')));
+}
+
+function parsePrice(cell) {
+  if (cell == null) return null;
+  const s = String(cell).trim();
+  if (!s) return null;
+  // remove currency symbols and whitespace, normalize comma to dot
+  const cleaned = s.replace(/[^0-9.,-]+/g, '').replace(/,/g, '.');
+  const n = parseFloat(cleaned);
+  return isNaN(n) ? null : n;
 }
 
 document.getElementById('csvSave').addEventListener('click', () => {
@@ -1066,8 +1263,16 @@ document.getElementById('csvSave').addEventListener('click', () => {
         if (!existing.sizeColor && catalogEntry.sizeColor) existing.sizeColor = catalogEntry.sizeColor;
         if (catalogEntry.price && !existing.price) { existing.listPrice = catalogEntry.listPrice; existing.price = catalogEntry.price; }
       }
+      // apply pasted price if provided
+      if (row.price != null) {
+        existing.listPrice = row.price;
+        const mult = Math.max(0, Math.min(100, Number(loadDiscountPct() || 30))) / 100;
+        existing.price = Math.round((Number(row.price) * mult) * 100) / 100;
+      }
       updated++;
     } else {
+      const listP = row.price != null ? row.price : (catalogEntry?.listPrice);
+      const computedPrice = listP != null ? Math.round((Number(listP) * (Math.max(0, Math.min(100, Number(loadDiscountPct() || 30))) / 100)) * 100) / 100 : undefined;
       state.items.unshift({
         id: uid(),
         variantId: row.variantId,
@@ -1076,12 +1281,13 @@ document.getElementById('csvSave').addEventListener('click', () => {
         sold: 0,
         imageUrl: catalogEntry?.image || '',
         sizeColor: catalogEntry?.sizeColor || '',
-        listPrice: catalogEntry?.listPrice,
-        price: catalogEntry?.price,
+        listPrice: listP,
+        price: computedPrice,
         notes: '',
         dateAdded: new Date().toISOString().slice(0, 10),
       });
       if (catalogEntry) autoFilled++;
+      if (row.price != null) autoFilled++; // count that we set price from paste
       added++;
     }
   });
@@ -1224,5 +1430,25 @@ if (state.github) {
 
     toast(`<span>Settings saved</span>`);
     closeSettings();
+  });
+})();
+
+// Proxy UI wiring: load saved proxy URL into the input and wire fetch button
+(function () {
+  const input = document.getElementById('proxyUrl');
+  const btn = document.getElementById('btnFetchProxy');
+  if (!input || !btn) return;
+  const saved = loadProxyUrl();
+  input.value = saved || '';
+  input.classList.add('proxy-input');
+  input.addEventListener('change', () => saveProxyUrl(input.value.trim()));
+  btn.addEventListener('click', async () => {
+    const url = (input.value || '').trim();
+    if (!url) {
+      toast('<span>Please enter a proxy URL first</span>');
+      return;
+    }
+    saveProxyUrl(url);
+    await fetchCatalogViaCustomProxy(url);
   });
 })();

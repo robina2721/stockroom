@@ -27,6 +27,8 @@
         <label for="discountPct" style="font-size:12px;color:var(--muted);">Discount %</label>
         <input id="discountPct" type="number" min="0" max="99" value="30" style="width:66px;padding:8px;border-radius:7px;border:1px solid var(--line);background:transparent;color:var(--text);">
       </div>
+      <input id="proxyUrl" type="url" placeholder="Proxy URL (e.g. http://localhost:3000)" style="width:220px;padding:8px;border-radius:7px;border:1px solid var(--line);">
+      <button class="btn btn-ghost" id="btnFetchProxy" title="Fetch catalog via proxy" aria-label="Fetch via proxy">Fetch via proxy</button>
       <button class="btn btn-ghost" id="btnThemeToggle" title="Toggle light / dark theme" aria-label="Toggle theme">🌓</button>
       <button class="btn btn-ghost" id="btnSettings" title="Settings" aria-label="Settings">⚙</button>
       <button class="btn btn-ghost" id="btnExport">Export JSON</button>
@@ -106,6 +108,11 @@
         <input type="url" id="f_image" placeholder="Paste the image link from your addisoutfits.com product page">
         <div class="hint">Right-click the product photo on addisoutfits.com and choose “Copy image address”, then paste it here. No link yet? Leave blank — a placeholder tag is used until you add one.</div>
         <div class="img-preview" id="imgPreview"><span>No image yet</span></div>
+      </div>
+      <div class="field">
+        <label for="f_price">List price (optional)</label>
+        <input type="number" id="f_price" min="0" step="0.01" placeholder="e.g. 24.99">
+        <div class="hint">Enter the full (list) price — the discounted price is calculated automatically.</div>
       </div>
       <div class="field">
         <label for="f_notes">Notes</label>
